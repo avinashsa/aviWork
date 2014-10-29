@@ -1,0 +1,4 @@
+sqlplus $ATADBACONNECT << EOF
+CREATE TABLE ZCHGTMP AS SELECT * from charge where 1=2;
+CREATE TABLE ZNORMALISED_EVENT AS SELECT * from charge where 1=2;
+EOF
