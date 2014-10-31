@@ -1,0 +1,180 @@
+declare
+  start_date DATE ;
+  end_date DATE;
+  overlap_days number(4,2);
+  overlap_start date;
+  overlap_end date;
+  discount_missed number(10,6);
+  arr_adv number(2);
+  original_desd date;
+  original_deed date;
+  original_rcesd date;
+  original_rceed date;
+  report_date date;
+  curr_service_id number(10);
+  curr_service_name varchar2(64);
+  curr_account_id number(10);
+  curr_account_name  VARCHAR2(80);
+  curr_company_number  VARCHAR2(15);
+  curr_official_name VARCHAR2(200);
+  
+begin
+  report_date := sysdate;
+  curr_service_id := NULL;
+  curr_service_name := NULL;
+  curr_account_id := NULL;
+  curr_account_name := NULL;
+  curr_company_number :=  NULL;
+  curr_official_name := NULL;
+
+    dbms_output.put_line(sysdate);   
+  start_date := to_date('01/09/2014 00:00:00','dd/mm/yyyy hh24:mi:ss') ; 
+  end_date   := to_date('11/10/2014 00:00:00','dd/mm/yyyy hh24:mi:ss') ;
+  for instances in (
+      select /*+ full(dsc) parallel(dsc 8) */
+      min(dsc.effective_start_date) desd, max(dsc.effective_end_date) deed
+      ,min(rc.effective_start_date) rcesd , max(rc.effective_end_date) rceed
+      ,ph.producT_id, ph.product_name, ph.possible_rc, ph.possible_rc_name
+      ,dsc.product_instance_id dscpiid,rc.product_instance_id rcpiid,dsc.base_product_instance_id 
+      ,ph.perc_discount, ph.monthly_charge
+      from pbi_2072_prd_dsc_combo_v3 ph,product_instance_history dsc, product_instance_history rc
+      where ph.product_id  = dsc.producT_id
+        and dsc.effective_end_date >= start_date
+        and dsc.effective_start_date < end_date
+        and ph.possible_rc = rc.producT_id
+        and rc.effective_end_date >= start_date
+        and rc.effective_start_date < end_date
+        and rc.base_product_instance_id = dsc.base_product_instancE_id
+        and dsc.producT_instancE_status_code = 3
+        and rc.producT_instancE_status_code = 3
+--        and rc.base_product_instance_id = 149366208--30831919
+        group by ph.producT_id, ph.product_name, ph.possible_rc, ph.possible_rc_name,dsc.product_instance_id,rc.product_instance_id ,ph.perc_discount, ph.monthly_charge ,dsc.base_product_instance_id 
+    ) loop
+
+    original_desd  := instances.desd;
+    original_deed  := instances.deed;
+    original_rcesd := instances.rcesd;
+    original_rceed := instances.rceed;
+    
+
+      if instances.desd < start_date
+        then
+           instances.desd := start_date ;
+      end if;
+      if instances.rcesd < start_date
+        then
+           instances.rcesd := start_date;
+      end if;
+      if instances.deed > end_date
+        then
+           instances.deed := end_date ;
+      end if;
+      if instances.rceed > end_date
+        then
+           instances.rceed := end_date;
+      end if;
+
+
+      if ( instances.deed = end_date AND instances.rceed = end_date  )
+      then
+              insert into pb2027_log 
+               (report_date,orig_desd, orig_deed, orig_rcesd, orig_rceed, desd, deed, rcesd, rceed , base_producT_instance_id
+               ,rc_piid,dsc_piid, discarded, discard_reason)                
+                values
+               (report_date,original_desd, original_deed, original_rcesd, original_rceed, instances.desd, instances.deed, instances.rcesd, instances.rceed
+                , instances.base_producT_instance_id,instances.rcpiid, instances.dscpiid,1,'deed = end_date and rceed = end_date');
+                  commit;
+
+         dbms_output.put_line('all ok with dscid '||instances.dscpiid ||' rcid '|| instances.rcpiid  );
+       goto xxx;
+      end if;
+            
+      if ( instances.deed <  instances.rcesd or instances.desd >  instances.rcesd  )
+      then
+
+               insert into pb2027_log 
+                (report_date,orig_desd, orig_deed, orig_rcesd, orig_rceed , desd, deed, rcesd, rceed, 
+                base_producT_instance_id,rc_piid,dsc_piid, discarded, discard_reason)                
+                values
+                (report_date,original_desd, original_deed, original_rcesd, original_rceed, instances.desd, instances.deed, instances.rcesd, instances.rceed, 
+               instances.base_producT_instance_id,instances.rcpiid, instances.dscpiid,1,'deed < rcesd or desd > rcesd');
+   commit;
+
+         dbms_output.put_line('No Overlap '||instances.dscpiid ||' rcid '|| instances.rcpiid );
+       goto xxx;
+      end if;
+      
+      if instances.rcesd <= instances.desd 
+        then
+        overlap_start := instances.desd;
+      else
+        overlap_start := instances.rcesd;
+      end if;
+      
+      if instances.rceed >= instances.deed
+        then
+          overlap_end := instances.deed;
+      else    
+          overlap_end := instances.rceed;
+      end if;
+      
+      select Tr.Advance_Charge_Period into arr_adv
+       from tariff_history th, product_tariff pt,TARIFF_RECURRING tr
+             where  pt.producT_id = instances.possible_rc
+                   and pt.tariff_id = th.tariff_id
+                   and th.billable_ind_code = 1
+                   and tr.tariff_id = th.tariff_id
+                   and th.tariff_id in (15000303,3100403);
+
+      overlap_days := overlap_end+one_sec - overlap_start;
+      
+     select service_name , service_id, cnh.prime_account_id, cnh.primary_identifier, cnh.company_number,ph.official_name
+       into curr_service_id, curr_service_name,curr_account_id, curr_account_name, curr_company_number, curr_official_name 
+       from service_history sh, customer_node_history cnh, person_history ph 
+      where sh.base_product_instance_id = instances.base_product_instance_id
+        and sysdate between sh.effective_start_Date and sh.effective_end_date
+        and sh.service_status_code = 3
+        and sysdate between cnh.effective_start_Date and cnh.effective_end_date
+        and cnh.customer_node_id = sh.customer_node_id
+        and ph.person_id = cnh.person_id
+        and sysdate between ph.effective_start_Date and ph.effective_end_date        
+        ;
+      
+      if arr_adv = -1
+        then 
+         discount_missed := -round(((instances.monthly_charge*overlap_days/30.4375) * (instances.perc_discount/100)),2);
+        else 
+         discount_missed := round((instances.monthly_charge*(instances.perc_discount/100)),2) - round(((instances.monthly_charge*overlap_days/30.4375)*(instances.perc_discount/100)),2);
+       end if;
+
+       insert into pb2027_log 
+       (report_date,orig_desd, orig_deed, orig_rcesd, orig_rceed , desd, deed, rcesd, rceed, base_producT_instance_id,rc_piid, dsc_piid
+       ,monthly_charge, perc_discount,overlap_start, overlap_end, overlap_days,discount_missed)
+                values
+       (report_date,original_desd, original_deed, original_rcesd, original_rceed , instances.desd, instances.deed, instances.rcesd, instances.rceed, instances.base_producT_instance_id, instances.rcpiid, instances.dscpiid
+        ,instances.monthly_charge, instances.perc_discount,overlap_start, overlap_end, overlap_days,discount_missed);
+        commit;
+        insert into pb2027_credit_debit 
+        (report_date, base_product_instance_id, rc_piid, dsc_piid,service_id,account_id, desd, deed, rcesd, rceed
+        ,monthly_charge,overlap_days,perc_discount, discount_missed
+        ,discount_name,rc_name,service_name,account_name,company_number,official_name )
+        values
+        (report_date, instances.base_product_instance_id, instances.rcpiid, instances.dscpiid, curr_service_id, curr_account_id,
+         instances.desd,instances.deed, instances.rcesd, instances.rceed,instances.monthly_charge,overlap_days,instances.perc_discount
+         ,discount_missed,instances.product_name, instances.possible_rc_name, curr_service_name, curr_account_name ,curr_company_number, curr_official_name);
+         commit;
+
+       --dbms_output.put_line('****************************************************************************************************************************************************');       
+       --dbms_output.put_line('discount_name = ' || instances.product_name ||' rc_name = ' || instances.possible_rc_name );
+       --dbms_output.put_line('perc_discount = ' || instances.perc_discount || ' montly charge = ' ||instances.monthly_charge);
+       --dbms_output.put_line('desd = ' ||instances.desd||' deed = '||instances.deed||' rcesd = '||instances.rcesd||' rceed = '||instances.rceed);
+       --dbms_output.put_line('overlap_start = '||overlap_start||' overlap_end = '||overlap_end||' overlap_days = '|| overlap_days );
+       --dbms_output.put_line('arr_adv = '||arr_adv ||' discount_missed = '||discount_missed);
+       --dbms_output.put_line('****************************************************************************************************************************************************');
+ <<xxx>>
+  begin
+    null;
+  end;    
+  end loop;
+  dbms_output.put_line(sysdate);   
+end;
